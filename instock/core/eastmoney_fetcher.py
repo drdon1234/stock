@@ -75,12 +75,13 @@ class eastmoney_fetcher:
             'Referer': 'https://quote.eastmoney.com/',
             'Accept': '*/*',
             'Accept-Language': 'zh-CN,zh;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br, zstd',
+            # 不声明 br/zstd：环境里没装 brotli/zstandard 时 requests 无法解压，大数据响应会解析失败
+            'Accept-Encoding': 'gzip, deflate',
             'Connection': 'keep-alive',
         }
         session.headers.update(headers)
         # 设置Cookie
-        session.cookies.update({'Cookie': self._get_cookie()})
+        session.headers['Cookie'] = self._get_cookie()
         return session
 
     def make_request(self, url, params=None, retry=3, timeout=10):

@@ -3,6 +3,7 @@
 
 import logging
 import os.path
+import time
 import datetime
 import numpy as np
 import pandas as pd
@@ -20,6 +21,7 @@ import instock.core.crawling.stock_fund_em as sff
 import instock.core.crawling.stock_fhps_em as sfe
 import instock.core.crawling.stock_chip_race as scr
 import instock.core.crawling.stock_limitup_reason as slr
+import instock.core.crawling.stock_spot_backup as ssb
 
 __author__ = 'myh '
 __date__ = '2023/3/10 '
@@ -59,6 +61,56 @@ def is_open_with_line(price):
     return price != '-'
 
 
+# 东方财富 clist 接口失败的时间，之后30分钟内不再请求，直接用备用数据源，避免加重限流
+_em_clist_down_time = 0
+_EM_CLIST_RETRY_SECONDS = 1800
+
+
+# 先用东方财富接口，失败或为空时改用备用数据源（东方财富 clist 接口经常被限流）
+def _fetch_with_backup(name, primary, backup):
+    global _em_clist_down_time
+    if time.time() - _em_clist_down_time > _EM_CLIST_RETRY_SECONDS:
+        try:
+            data = primary()
+            if data is not None and len(data.index) > 0:
+                return data
+            logging.warning(f"stockfetch.{name}东方财富返回为空，改用备用数据源")
+        except Exception as e:
+            _em_clist_down_time = time.time()
+            logging.warning(f"stockfetch.{name}东方财富接口异常，30分钟内改用备用数据源：{e}")
+    return backup()
+
+
+# 综合选股原始数据缓存10分钟，供综合选股和备用数据源共用，避免重复抓取
+_selection_cache = {'time': 0, 'data': None}
+_SELECTION_CACHE_SECONDS = 600
+
+
+def _stock_selection_raw():
+    if _selection_cache['data'] is None or time.time() - _selection_cache['time'] > _SELECTION_CACHE_SECONDS:
+        _selection_cache['data'] = sst.stock_selection()
+        _selection_cache['time'] = time.time()
+    return _selection_cache['data']
+
+
+def _stock_selection_data():
+    data = _stock_selection_raw()
+    if data is None or len(data.index) == 0:
+        return None
+    data = data.copy()
+    data.columns = list(tbs.TABLE_CN_STOCK_SELECTION['columns'])
+    data.drop_duplicates('code', keep='last', inplace=True)
+    return data
+
+
+def _stock_selection_data_safe():
+    try:
+        return _stock_selection_data()
+    except Exception as e:
+        logging.error(f"stockfetch._stock_selection_data_safe处理异常：{e}")
+    return None
+
+
 # 读取股票交易日历数据
 def fetch_stocks_trade_date():
     try:
@@ -75,7 +127,7 @@ def fetch_stocks_trade_date():
 # 读取当天股票数据
 def fetch_etfs(date):
     try:
-        data = fee.fund_etf_spot_em()
+        data = _fetch_with_backup("fetch_etfs", fee.fund_etf_spot_em, ssb.fund_etf_spot_backup)
         if data is None or len(data.index) == 0:
             return None
         if date is None:
@@ -93,7 +145,8 @@ def fetch_etfs(date):
 # 读取当天股票数据
 def fetch_stocks(date):
     try:
-        data = she.stock_zh_a_spot_em()
+        data = _fetch_with_backup("fetch_stocks", she.stock_zh_a_spot_em,
+                                  lambda: ssb.stock_zh_a_spot_backup(_stock_selection_data_safe()))
         if data is None or len(data.index) == 0:
             return None
         if date is None:
@@ -110,12 +163,7 @@ def fetch_stocks(date):
 
 def fetch_stock_selection():
     try:
-        data = sst.stock_selection()
-        if data is None or len(data.index) == 0:
-            return None
-        data.columns = list(tbs.TABLE_CN_STOCK_SELECTION['columns'])
-        data.drop_duplicates('code', keep='last', inplace=True)
-        return data
+        return _stock_selection_data()
     except Exception as e:
         logging.error(f"stockfetch.fetch_stocks_selection处理异常：{e}")
     return None
@@ -125,7 +173,10 @@ def fetch_stock_selection():
 def fetch_stocks_fund_flow(index):
     try:
         cn_flow = tbs.CN_STOCK_FUND_FLOW[index]
-        data = sff.stock_individual_fund_flow_rank(indicator=cn_flow['cn'])
+        data = _fetch_with_backup(
+            "fetch_stocks_fund_flow",
+            lambda: sff.stock_individual_fund_flow_rank(indicator=cn_flow['cn']),
+            lambda: ssb.stock_individual_fund_flow_rank_backup(cn_flow['cn'], _stock_selection_data_safe()))
         if data is None or len(data.index) == 0:
             return None
         data.columns = list(cn_flow['columns'])
@@ -140,7 +191,11 @@ def fetch_stocks_fund_flow(index):
 def fetch_stocks_sector_fund_flow(index_sector, index_indicator):
     try:
         cn_flow = tbs.CN_STOCK_SECTOR_FUND_FLOW[1][index_indicator]
-        data = sff.stock_sector_fund_flow_rank(indicator=cn_flow['cn'], sector_type=tbs.CN_STOCK_SECTOR_FUND_FLOW[0][index_sector])
+        sector_type = tbs.CN_STOCK_SECTOR_FUND_FLOW[0][index_sector]
+        data = _fetch_with_backup(
+            "fetch_stocks_sector_fund_flow",
+            lambda: sff.stock_sector_fund_flow_rank(indicator=cn_flow['cn'], sector_type=sector_type),
+            lambda: ssb.stock_sector_fund_flow_rank_backup(cn_flow['cn'], sector_type))
         if data is None or len(data.index) == 0:
             return None
         data.columns = list(cn_flow['columns'])

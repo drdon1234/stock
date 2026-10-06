@@ -1,0 +1,49 @@
+# InStock 部署，数据卷都在 /vol1/1000/docker/instock 下
+# 用法见同目录 README.md
+name: instock
+
+services:
+  instock-db:
+    image: mariadb:11
+    container_name: instock-db
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_PASSWORD:?请在 .env 中设置 DB_PASSWORD}
+      TZ: Asia/Shanghai
+    volumes:
+      - /vol1/1000/docker/instock/data/mariadb:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks:
+      - instock_network
+
+  instock:
+    build:
+      context: ../..
+      dockerfile: docker/deploy/Dockerfile
+    image: instock:local
+    container_name: instock
+    restart: unless-stopped
+    ports:
+      - "9988:9988"
+    environment:
+      db_host: instock-db
+      db_user: root
+      db_password: ${DB_PASSWORD:?请在 .env 中设置 DB_PASSWORD}
+      TZ: Asia/Shanghai
+    volumes:
+      - /vol1/1000/docker/instock/data/cache:/data/InStock/instock/cache
+      - /vol1/1000/docker/instock/data/log:/data/InStock/instock/log
+      - /vol1/1000/docker/instock/config/proxy.txt:/data/InStock/instock/config/proxy.txt:ro
+    depends_on:
+      instock-db:
+        condition: service_healthy
+    networks:
+      - instock_network
+
+networks:
+  instock_network:
+    driver: bridge

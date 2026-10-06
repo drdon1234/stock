@@ -1,0 +1,10 @@
+.git
+.github
+.idea
+img
+docker
+**/__pycache__
+instock/cache
+instock/log
+*.md
+*.bat
